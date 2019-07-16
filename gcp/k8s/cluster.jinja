@@ -19,6 +19,9 @@ resources:
 ########################################
 - name:  eu.artifacts.awesome-project.appspot.com-i2software-kubernetes-acl
   action: gcp-types/storage-v1:storage.BucketAccessControls.insert
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-service-account
   properties:
     bucket: eu.artifacts.awesome-project.appspot.com
     entity: user-i2software-kubernetes-service-account
@@ -84,11 +87,11 @@ resources:
           dailyMaintenanceWindow:
             startTime: 01:00
       initialClusterVersion: 1.13.6-gke.13
-{% for typeSuffix, endpoint in K8S_ENDPOINTS.iteritems() %}
 
 ###############################
 # TYPE PROVIDERS FOR K8S APIS #
 ###############################
+{% for typeSuffix, endpoint in K8S_ENDPOINTS.iteritems() %}
 - name: {{ TYPE_NAME }}{{ typeSuffix }}
   type: deploymentmanager.v2beta.typeProvider
   properties:
