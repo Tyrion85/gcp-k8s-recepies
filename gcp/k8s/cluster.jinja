@@ -1,0 +1,465 @@
+{% set TYPE_NAME = 'i2software-kubernetes-type' %}
+{% set K8S_ENDPOINTS = {'-v1-api': 'api/v1', '-v1-apis-apps': 'apis/apps/v1/', '-v1beta1-apps': 'apis/apps/v1beta1', '-v1beta1-extensions': 'apis/extensions/v1beta1', '-v1-rbac-authorization': 'apis/rbac.authorization.k8s.io/v1'} %}
+
+resources:
+
+#######################
+# K8S SERVICE ACCOUNT #
+#######################
+- type: iam.v1.serviceAccount
+  name: i2software-kubernetes-service-account
+  properties:
+    name: projects/awesome-project/serviceAccounts/i2software-kubernetes
+    projectId: awesome-project
+    accountId: i2software-kubernetes
+    displayName: i2software-kubernetes
+
+########################################
+# Container Registry Bucket ACL insert #
+########################################
+- name:  eu.artifacts.awesome-project.appspot.com-i2software-kubernetes-acl
+  action: gcp-types/storage-v1:storage.BucketAccessControls.insert
+  properties:
+    bucket: eu.artifacts.awesome-project.appspot.com
+    entity: user-i2software-kubernetes-service-account
+    role: WRITER
+
+##################
+# CLUSTER CONFIG #
+##################
+- type: container.v1.cluster
+  name: i2software-kubernetes
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-service-account
+  properties:
+    zone: europe-west3-a
+    cluster:
+      name: i2software-kubernetes
+      zone: europe-west3-a
+      location: europe-west3-a
+      network: projects/awesome-project/global/networks/default
+      addonsConfig:
+        horizontalPodAutoscaling:
+          disabled: false
+        httpLoadBalancing:
+          disabled: false
+        networkPolicyConfig:
+          disabled: false
+      subnetwork: projects/awesome-project/regions/europe-west3/subnetworks/francoforte
+      loggingService: "logging.googleapis.com/kubernetes"
+      monitoringService: "monitoring.googleapis.com/kubernetes"
+      nodePools:
+        - name: i2software-kubernetes-node-pool
+          config:
+            oauthScopes:
+            - "https://www.googleapis.com/auth/compute"
+            - "https://www.googleapis.com/auth/devstorage.read_only"
+            machineType: n1-standard-2
+            diskSizeGb: 100
+            serviceAccount: i2software-kubernetes@awesome-project.iam.gserviceaccount.com
+            metadata:
+              disable-legacy-endpoints: "true"
+            imageType: COS
+            labels:
+              env: stage
+              diskType: pd-standard
+          initialNodeCount: 3
+          autoscaling:
+            enabled: true
+            minNodeCount: 2
+            maxNodeCount: 4
+          management:
+            autoUpgrade: true
+            autoRepair: true
+          maxPodsConstraint:
+            maxPodsPerNode: 110
+      networkPolicy:
+        provider: CALICO
+        enabled: true
+      ipAllocationPolicy:
+        useIpAliases: true
+      maintenancePolicy:
+        window:
+          dailyMaintenanceWindow:
+            startTime: 01:00
+      initialClusterVersion: 1.13.6-gke.13
+{% for typeSuffix, endpoint in K8S_ENDPOINTS.iteritems() %}
+
+###############################
+# TYPE PROVIDERS FOR K8S APIS #
+###############################
+- name: {{ TYPE_NAME }}{{ typeSuffix }}
+  type: deploymentmanager.v2beta.typeProvider
+  properties:
+    options:
+      validationOptions:
+        # Kubernetes API accepts ints, in fields they annotate with string.
+        # This validation will show as warning rather than failure for
+        # Deployment Manager.
+        # https://github.com/kubernetes/kubernetes/issues/2971
+        schemaValidation: IGNORE_WITH_WARNINGS
+      # According to kubernetes spec, the path parameter 'name'
+      # should be the value inside the metadata field
+      # https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md
+      # This mapping specifies that
+      inputMappings:
+      - fieldName: name
+        location: PATH
+        methodMatch: ^(GET|DELETE|PUT)$
+        value: $.ifNull($.resource.properties.metadata.name, $.resource.name)
+      - fieldName: metadata.name
+        location: BODY
+        methodMatch: ^(PUT|POST)$
+        value: $.ifNull($.resource.properties.metadata.name, $.resource.name)
+      - fieldName: Authorization
+        location: HEADER
+        value: >
+          $.concat("Bearer ", $.googleOauth2AccessToken())
+    descriptorUrl: https://$(ref.i2software-kubernetes.endpoint)/swaggerapi/{{ endpoint }}
+{% endfor %}
+
+####################################
+# TEST DEAMONSET. CAN BE REMOVED.. #
+####################################
+- type: "awesome-project/i2software-kubernetes-type-v1beta1-extensions:/apis/extensions/v1beta1/namespaces/{namespace}/daemonsets"
+  name: i2software-kubernetes-startup-ds
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1beta1-extensions
+  properties:
+    namespace: default
+    apiVersion: extensions/v1beta1
+    kind: DaemonSet
+    metadata:
+      name: i2software-kubernetes-startup-ds
+      labels:
+        app: i2software-kubernetes-startup-ds
+    spec:
+      template:
+        metadata:
+          labels:
+            app: i2software-kubernetes-startup-ds
+        spec:
+          hostPID: true
+          securityContext:
+            runAsUser: 0
+            fsGroup: 0
+          hostNetwork: true
+          containers:
+            - name: startup-script
+              image: eu.gcr.io/google-containers/startup-script:v1
+              volumeMounts:
+              - name: homedir
+                mountPath: /host/home/i2software-kubernetes
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+                #readOnlyRootFilesystem: false
+                #runAsUser: 5001
+                #runAsGroup: 1002
+                capabilities:
+                  add:
+                    - SYS_PTRACE
+                    - SYS_ADMIN
+                #  add: ["SYS_ADMIN","DAC_OVERRIDE","DAC_READ_SEARCH","FOWNER"]
+              env:
+              - name: PGID
+                value: "115"
+              - name: STARTUP_SCRIPT
+                value: |
+                  #! /bin/bash
+                  # cd /home/i2software-kubernetes
+                  # docker-credential-gcr configure-docker
+                  echo "Starting..."
+                  docker-credential-gcr configure-docker
+                  echo "DONE"
+                  #while true; do sleep 3600; done
+          volumes:
+          - name: homedir
+            hostPath:
+              path: /home/i2software-kubernetes
+
+########################
+# FLUX SERVICE ACCOUNT #
+########################
+- type: "awesome-project/i2software-kubernetes-type-v1-api:/api/v1/namespaces/{namespace}/serviceaccounts"
+  name: i2software-kubernetes-flux-serviceaccount
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-api
+  properties:
+    namespace: default
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      labels:
+        name: flux
+      name: flux
+
+#####################
+# FLUX CLUSTER ROLE #
+#####################
+- type: "awesome-project/i2software-kubernetes-type-v1-rbac-authorization:/apis/rbac.authorization.k8s.io/v1/clusterroles"
+  name: i2software-kubernetes-flux-clusterrole
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-rbac-authorization
+  properties:
+    namespace: default
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      labels:
+        name: flux
+      name: flux
+    rules:
+      - apiGroups: ['*']
+        resources: ['*']
+        verbs: ['*']
+      - nonResourceURLs: ['*']
+        verbs: ['*']
+
+#############################
+# FLUX CLUSTER ROLE BINDING #
+#############################
+- type: "awesome-project/i2software-kubernetes-type-v1-rbac-authorization:/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+  name: i2software-kubernetes-flux-clusterrolebinding
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-rbac-authorization
+    - i2software-kubernetes-flux-serviceaccount
+    - i2software-kubernetes-flux-clusterrole
+  properties:
+    namespace: default
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      labels:
+        name: flux
+      name: flux
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: flux
+    subjects:
+      - kind: ServiceAccount
+        name: flux
+        namespace: default
+
+#############################
+# FLUX MEMCACHED DEPLOYMENT #
+#############################
+- type: "awesome-project/i2software-kubernetes-type-v1-apis-apps:/apis/apps/v1/namespaces/{namespace}/deployments"
+  name: i2software-kubernetes-flux-memcached
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-apis-apps
+  properties:
+    namespace: default
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: memcached
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          name: memcached
+      template:
+        metadata:
+          labels:
+            name: memcached
+        spec:
+          containers:
+          - name: memcached
+            image: memcached:1.4.25
+            imagePullPolicy: IfNotPresent
+            args:
+            - -m 512   # Maximum memory to use, in megabytes
+            - -I 5m    # Maximum size for one item
+            - -p 11211 # Default port
+            # - -vv    # Uncomment to get logs of each request and response.
+            ports:
+            - name: clients
+              containerPort: 11211
+
+##########################
+# FLUX MEMCACHED SERVICE #
+##########################
+- type: "awesome-project/i2software-kubernetes-type-v1-api:/api/v1/namespaces/{namespace}/services"
+  name: i2software-kubernetes-flux-memcached-service
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-api
+    - i2software-kubernetes-flux-memcached
+  properties:
+    namespace: default
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: memcached
+    spec:
+      ports:
+        - name: memcached
+          port: 11211
+      selector:
+        name: memcached
+
+################
+# FLUX GIT KEY #
+################
+- type: "awesome-project/i2software-kubernetes-type-v1-api:/api/v1/namespaces/{namespace}/secrets"
+  name: i2software-kubernetes-flux-git-key
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-api
+  properties:
+    namespace: default
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: flux-git-deploy
+    type: Opaque
+    data:
+      identity: [some-very-long-hash-of-key-goes-here] # Replace with git key OR even better, find a way NOT to store this key in git
+
+###################
+# FLUX DEPLOYMENT #
+###################
+- type: "awesome-project/i2software-kubernetes-type-v1-apis-apps:/apis/apps/v1/namespaces/{namespace}/deployments"
+  name: i2software-kubernetes-flux-deployment
+  metadata:
+    dependsOn:
+    - i2software-kubernetes-type-v1-apis-apps
+    - i2software-kubernetes-flux-git-key
+    - i2software-kubernetes-flux-memcached
+    - i2software-kubernetes-flux-clusterrolebinding
+  properties:
+    namespace: default
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: flux
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          name: flux
+      strategy:
+        type: Recreate
+      template:
+        metadata:
+          annotations:
+            prometheus.io.port: "3031" # tell prometheus to scrape /metrics endpoint's port.
+          labels:
+            name: flux
+        spec:
+          serviceAccountName: flux
+          volumes:
+          - name: git-key
+            secret:
+              secretName: flux-git-deploy
+              defaultMode: 0400 # when mounted read-only, we won't be able to chmod
+
+          # This is a tmpfs used for generating SSH keys. In K8s >= 1.10,
+          # mounted secrets are read-only, so we need a separate volume we
+          # can write to.
+          - name: git-keygen
+            emptyDir:
+              medium: Memory
+
+          # The following volume is for using a customised known_hosts
+          # file, which you will need to do if you host your own git
+          # repo rather than using github or the like. You'll also need to
+          # mount it into the container, below. See
+          # https://github.com/weaveworks/flux/blob/master/site/standalone-setup.md#using-a-private-git-host
+          #- name: ssh-config
+          #  configMap:
+          #    name: flux-ssh-config
+
+          # The following volume is for using a customised .kube/config,
+          # which you will need to do if you wish to have a different
+          # default namespace. You will also need to provide the configmap
+          # with an entry for `config`, and uncomment the volumeMount and
+          # env entries below.
+          # - name: kubeconfig
+          #   configMap:
+          #     name: flux-kubeconfig
+          containers:
+          - name: flux
+            # There are no ":latest" images for flux. Find the most recent
+            # release or image version at https://hub.docker.com/r/weaveworks/flux/tags
+            # and replace the tag here.
+            image: docker.io/weaveworks/flux:1.13.2
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+            ports:
+            - containerPort: 3030 # informational
+            volumeMounts:
+            - name: git-key
+              mountPath: /etc/fluxd/ssh # to match location given in image's /etc/ssh/config
+              readOnly: true # this will be the case perforce in K8s >=1.10
+            - name: git-keygen
+              mountPath: /var/fluxd/keygen # to match location given in image's /etc/ssh/config
+            # Include this if you need to mount a customised known_hosts
+            # file; you'll also need the volume declared above.
+            #- name: ssh-config
+            #  mountPath: /root/.ssh
+
+            # Include this and the volume "kubeconfig" above, and the
+            # environment entry "KUBECONFIG" below, to override the config
+            # used by kuebctl.
+            # - name: kubeconfig
+            #   mountPath: /etc/fluxd/kube
+
+            # Include this to point kubectl at a different config; you
+            # will need to do this if you have mounted an alternate config
+            # from a configmap, as in commented blocks above.
+            # env:
+            # - name: KUBECONFIG
+            #   value: /etc/fluxd/kube/config
+
+            args:
+
+            # if you deployed memcached in a different namespace to flux,
+            # or with a different service name, you can supply these
+            # following two arguments to tell fluxd how to connect to it.
+            # - --memcached-hostname=memcached.default.svc.cluster.local
+
+            # use the memcached ClusterIP service name by setting the
+            # memcached-service to string empty
+            - --memcached-service=
+
+            # this must be supplied, and be in the tmpfs (emptyDir)
+            # mounted above, for K8s >= 1.10
+            - --ssh-keygen-dir=/var/fluxd/keygen
+
+            # replace or remove the following URL
+            - --git-url=ssh://tyrion85@gmail.com@source.developers.google.com:2022/p/awesome-project/r/i2software-k8s-config
+            - --git-branch=master
+            # include this if you want to restrict the manifests considered by flux
+            # to those under the following relative paths in the git repository
+            - --git-path=i2software-gcloud
+
+            # include these next two to connect to an "upstream" service
+            # (e.g., Weave Cloud). The token is particular to the service.
+            # - --connect=wss://cloud.weave.works/api/flux
+            # - --token=abc123abc123abc123abc123
+
+            # serve /metrics endpoint at different port.
+            # make sure to set prometheus' annotation to scrape the port value.
+            - --listen-metrics=:3031
+            - --git-poll-interval=1m
+
+outputs:
+{% for typeSuffix, endpoint in K8S_ENDPOINTS.iteritems() %}
+- name: clusterType{{ typeSuffix }}
+  value: i2software-kubernetes-type{{ typeSuffix }}
+{% endfor %}

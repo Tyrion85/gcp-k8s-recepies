@@ -1,0 +1,95 @@
+resources:
+- type: iam.v1.serviceAccount
+  name: i2software-cloudsql-service-account
+  properties:
+    name: projects/stellar-market-242913/serviceAccounts/i2software-cloudsql
+    projectId: awesome-project
+    accountId: i2software-cloudsql
+    displayName: i2software-cloudsql
+- type: sqladmin.v1beta4.instance
+  name: i2software-stage-db
+  metadata:
+    dependsOn:
+    - i2software-cloudsql-service-account
+  properties:
+    kind: "sql#instance"
+    name: i2software-stage-db-7
+    project: awesome-project
+    backendType: SECOND_GEN
+    databaseVersion: POSTGRES_9_6
+    region: europe-west3
+    maxDiskSize: 10485760
+    settings:
+      kind: "sql#settings"
+      settingsVersion: 1
+      tier: db-custom-2-8192
+      pricingPlan: PER_USE
+      replicationType: ASYNCHRONOUS
+      #activationPolicy: ALWAYS
+      backupConfiguration:
+        kind: "sql#backupConfiguration"
+        startTime: "20:00"
+        location: europe-west3
+        enabled: true
+      ipConfiguration:
+        ipv4Enabled: true
+        # replace IP with valid one
+        #authorizedNetworks:
+        #- kind: "sql#aclEntry"
+        #  name: bg_office
+        #  value: 1.1.1.1
+        requireSsl: false
+      locationPreference:
+        kind: "sql#locationPreference"
+        zone: europe-west3-a
+      #databaseReplicationEnabled: true
+      #crashSafeReplicationEnabled: true
+      dataDiskSizeGb: 10
+      dataDiskType: PD_SSD
+      availabilityType: ZONAL
+    instanceType: CLOUD_SQL_INSTANCE
+    serviceAccountEmailAddress: i2software-cloudsql@awesome-project.iam.gserviceaccount.com
+#- type: sqladmin.v1beta4.database
+#  name: i2software-cloudsql-stage-postgres-db
+#  properties:
+#    kind: "sql#database"
+#    name: i2software-postgres
+#    project: awesome-project
+#    instance: i2software-stage-db-2
+#    charset: utf8
+- type: sqladmin.v1beta4.user
+  name: i2software-cloudsql-stage-postgres-svc_conf-user
+  metadata:
+    dependsOn:
+    - i2software-stage-db
+  properties:
+    kind: "sql#user"
+    name: svc_conf
+    project: awesome-project
+    instance: i2software-stage-db-7
+    password: {{ properties['svc_conf_password'] }}
+- name: i2software-cloudsql-stage-postgres-delete-postgres-user
+  action: gcp-types/sqladmin-v1beta4:sql.users.delete  
+  properties:
+    host: "%"
+    instance: i2software-stage-db-7
+    name: postgres
+    project: awesome-project
+  metadata:
+    dependsOn:
+    - i2software-stage-db
+    - i2software-cloudsql-stage-postgres-svc_conf-user
+    runtimePolicy:
+    - CREATE
+- type: sqladmin.v1beta4.user
+  name: i2software-cloudsql-stage-postgres-user
+  metadata:
+    dependsOn:
+    - i2software-stage-db
+    - i2software-cloudsql-stage-postgres-delete-postgres-user
+  properties:
+    kind: "sql#user"
+    name: postgres
+    project: awesome-project
+    instance: i2software-stage-db-7
+    password: {{ properties['postgres_password'] }}

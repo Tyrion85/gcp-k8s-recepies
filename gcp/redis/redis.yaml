@@ -1,0 +1,11 @@
+resources:
+- type: gcp-types/redis-v1:projects.locations.instances
+  name: i2software-redis
+  properties:
+    parent: projects/awesome-project/locations/europe-west3
+    instanceId: i2software-redis
+    authorizedNetwork: projects/awesome-project/global/networks/default
+    memorySizeGb: 1
+    tier: BASIC
+    displayName: redis
+    
