@@ -5,7 +5,7 @@ Whole infrastructure is defined in relevant .yaml files.
 
 Kubernetes cluster config file automatically deploys Weave Flux, which then takes over apps deployment.
 
-In that way, a complete cluster can be recreated from a set of versioned and audietd config files.
+In that way, a complete cluster can be recreated from a set of versioned and audited config files.
 
 Names and relevant values (project, region, private network IP address etc) are currently hardcoded.
 
